@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>octra signer</title>
+<link rel="stylesheet" href="style.css">
+<style>
+  .sign-wrap {
+    max-width: 480px;
+    margin: 0 auto;
+    background: #fff;
+    border-left: 1px solid #E5E9EF;
+    border-right: 1px solid #E5E9EF;
+    min-height: 100%;
+    display: flex;
+    flex-direction: column;
+  }
+  .sign-header {
+    background: #D0D7E2;
+    border-bottom: 1px solid #C0C6D0;
+    padding: 8px 14px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    flex-shrink: 0;
+  }
+  .sign-header .title {
+    font-size: 11px;
+    font-weight: bold;
+    color: #3B567F;
+    letter-spacing: 1px;
+    text-transform: lowercase;
+  }
+  .origin-chip {
+    font-family: 'Courier New', Consolas, monospace;
+    font-size: 10px;
+    color: #3B567F;
+    background: #fff;
+    border: 1px solid #B0BACF;
+    padding: 2px 6px;
+    max-width: 280px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .origin-chip.insecure {
+    background: #F6E8E8;
+    border-color: #E0B8B8;
+    color: #8B3A3A;
+  }
+  .sign-body {
+    padding: 12px 14px;
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+  }
+  #view-loading, #view-no-wallet, #view-locked, #view-approve, #view-result, #view-error {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    gap: 10px;
+  }
+  .sign-body .action-row {
+    margin-top: auto;
+    padding-top: 12px;
+    border-top: 1px solid #E5E9EF;
+  }
+  .warn-banner {
+    background: #F6E8E8;
+    border: 1px solid #E0B8B8;
+    color: #8B3A3A;
+    padding: 8px 10px;
+    font-size: 11px;
+    letter-spacing: 1px;
+  }
+  .detail-table .amount {
+    color: #3B567F;
+    font-weight: bold;
+  }
+</style>
+</head>
+<body>
+
+<div class="sign-wrap">
+
+  <div class="sign-header">
+    <span class="title" id="header-method">octra signer</span>
+    <span class="origin-chip" id="origin-badge">awaiting dapp...</span>
+  </div>
+
+  <div class="sign-body">
+
+    <div id="view-loading">
+      <div class="loading" id="loading-status">waiting for request from dapp...</div>
+    </div>
+
+    <div id="view-no-wallet" style="display:none">
+      <div class="error-box" id="no-wallet-msg">no wallet found. open octra_wallet in another tab and create or import a wallet first.</div>
+      <div class="action-row">
+        <button class="modal-btn modal-btn-primary" onclick="signUi.closeWith('no_wallet','no wallet')">close</button>
+      </div>
+    </div>
+
+    <div id="view-locked" style="display:none">
+      <div class="section">
+        <div class="section-title">wallet locked</div>
+        <div id="modal-pin" style="padding:10px">
+          <div class="form-row" id="wallet-picker-row" style="display:none">
+            <label>unlock which wallet</label>
+            <select id="wallet-picker"></select>
+          </div>
+          <div class="form-row">
+            <label>6-digit pin</label>
+            <input type="password" id="pin-input" maxlength="6" inputmode="numeric" placeholder="------" autocomplete="off">
+          </div>
+          <div class="loading" id="unlock-status" style="display:none"></div>
+          <div class="error-box" id="pin-err" style="display:none"></div>
+        </div>
+      </div>
+      <div class="action-row">
+        <button class="modal-btn" id="btn-cancel-unlock" onclick="signUi.closeWith('user_rejected','cancelled')">cancel</button>
+        <button class="modal-btn modal-btn-primary" id="btn-unlock" onclick="signUi.doUnlock()">unlock</button>
+      </div>
+    </div>
+
+    <div id="view-approve" style="display:none">
+      <div class="section">
+        <div class="section-title">signing as</div>
+        <table class="detail-table">
+          <tr><td>address</td><td class="mono" id="my-addr">...</td></tr>
+          <tr><td>balance</td><td class="mono amount" id="my-balance">...</td></tr>
+          <tr><td>network</td><td class="mono" id="my-network">...</td></tr>
+        </table>
+      </div>
+
+      <div class="section">
+        <div class="section-title" id="method-label">request</div>
+        <table class="detail-table" id="method-details">
+        </table>
+      </div>
+
+      <div class="warn-banner" id="approve-warn">verify all details. this action cannot be undone.</div>
+
+      <div class="loading" id="submit-status" style="display:none"></div>
+
+      <div class="action-row">
+        <button class="modal-btn" onclick="signUi.closeWith('user_rejected','rejected by user')">reject</button>
+        <button class="modal-btn modal-btn-primary" id="btn-approve" onclick="signUi.doApprove()">approve</button>
+      </div>
+    </div>
+
+    <div id="view-result" style="display:none">
+      <div class="section">
+        <div class="section-title" id="result-label">complete</div>
+        <table class="detail-table" id="result-body">
+        </table>
+      </div>
+      <div class="action-row">
+        <button class="modal-btn modal-btn-primary" onclick="signUi.finishAndClose()">close</button>
+      </div>
+    </div>
+
+    <div id="view-error" style="display:none">
+      <div class="error-box" id="error-msg">an error occurred</div>
+      <div class="action-row">
+        <button class="modal-btn modal-btn-primary" onclick="signUi.finishAndClose()">close</button>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<script src="sign.js"></script>
+
+</body>
+</html>

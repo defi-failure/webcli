@@ -65,6 +65,7 @@ extern "C" {
 #include "lib/pvac_bridge.hpp"
 #include "lib/stealth.hpp"
 #include "lib/txcache.hpp"
+#include "lib/dapp_connections.hpp"
 
 using json = nlohmann::json;
 
@@ -78,6 +79,7 @@ static std::atomic<bool> g_wallet_loaded{false};
 static std::string g_wallet_path = "data/wallet.oct";
 static std::string g_pin;
 static TxCache g_txcache;
+static octra::DappConnections g_dapp_conn;
 
 static nlohmann::json g_fee_cache;
 static double g_fee_cache_ts = 0.0;
@@ -359,6 +361,7 @@ int main(int argc, char** argv) {
     if (port <= 0) port = 8420;
 
     octra::ensure_data_dir();
+    g_dapp_conn.load();
 
     httplib::Server svr;
     svr.set_read_timeout(300, 0);
@@ -369,6 +372,56 @@ int main(int argc, char** argv) {
     svr.set_keep_alive_timeout(5);
     svr.set_keep_alive_max_count(100);
     //
+
+    std::string host_a = "127.0.0.1:" + std::to_string(port);
+    std::string host_b = "localhost:" + std::to_string(port);
+
+    svr.set_pre_routing_handler([host_a, host_b](const httplib::Request& req, httplib::Response& res) {
+        std::string host = req.get_header_value("Host");
+        if (!host.empty() && host != host_a && host != host_b) {
+            res.status = 421;
+            res.set_content(json{{"error", "unexpected host"}}.dump(), "application/json");
+            return httplib::Server::HandlerResponse::Handled;
+        }
+
+        bool is_dapp_cors = (req.path == "/api/dapp/status" || req.path == "/api/dapp/disconnect");
+        std::string origin = req.get_header_value("Origin");
+
+        if (req.method == "OPTIONS" && is_dapp_cors) {
+            if (octra::is_valid_http_origin(origin)) {
+                res.set_header("Access-Control-Allow-Origin", origin);
+                res.set_header("Vary", "Origin");
+                res.set_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+                res.set_header("Access-Control-Allow-Headers", "Content-Type");
+                res.set_header("Access-Control-Max-Age", "600");
+            }
+            res.status = 204;
+            return httplib::Server::HandlerResponse::Handled;
+        }
+
+        if (is_dapp_cors && octra::is_valid_http_origin(origin)) {
+            res.set_header("Access-Control-Allow-Origin", origin);
+            res.set_header("Vary", "Origin");
+        }
+
+        if ((req.method == "POST" || req.method == "PUT" || req.method == "DELETE") &&
+            req.path.rfind("/api/", 0) == 0) {
+            std::string cl = req.get_header_value("Content-Length");
+            long long clen = 0;
+            try { if (!cl.empty()) clen = std::stoll(cl); } catch (...) {}
+            if (clen > 0 || req.has_header("Transfer-Encoding")) {
+                std::string ct = req.get_header_value("Content-Type");
+                if (ct.find("application/json") == std::string::npos) {
+                    res.status = 415;
+                    res.set_content(json{{"error", "content-type must be application/json"}}.dump(),
+                                    "application/json");
+                    return httplib::Server::HandlerResponse::Handled;
+                }
+            }
+        }
+
+        return httplib::Server::HandlerResponse::Unhandled;
+    });
 
     svr.set_post_routing_handler([](const httplib::Request&, httplib::Response& res) {
         res.set_header("X-Frame-Options", "DENY");
@@ -892,6 +945,7 @@ int main(int argc, char** argv) {
             return;
         }
         octra::manifest_remove(addr);
+        g_dapp_conn.remove_by_wallet(addr);
         json j;
         j["ok"] = true;
         res.set_content(j.dump(), "application/json");
@@ -2329,6 +2383,138 @@ int main(int argc, char** argv) {
         }
         json j;
         j["ok"] = true;
+        res.set_content(j.dump(), "application/json");
+    });
+
+    svr.Get("/api/dapp/status", [](const httplib::Request& req, httplib::Response& res) {
+        std::string origin = req.get_header_value("Origin");
+        if (!octra::is_valid_http_origin(origin)) {
+            res.status = 403;
+            res.set_content(err_json("invalid origin").dump(), "application/json");
+            return;
+        }
+        json j;
+        if (!g_wallet_loaded) {
+            j["connected"] = false;
+            j["reason"] = "no_wallet";
+            res.set_content(j.dump(), "application/json");
+            return;
+        }
+        std::string addr;
+        {
+            std::lock_guard<std::mutex> lock(g_mtx);
+            addr = g_wallet.addr;
+        }
+        if (!g_dapp_conn.is_connected(origin, addr)) {
+            j["connected"] = false;
+            res.set_content(j.dump(), "application/json");
+            return;
+        }
+        g_dapp_conn.touch(origin, addr);
+        {
+            std::lock_guard<std::mutex> lock(g_mtx);
+            j["connected"] = true;
+            j["address"] = g_wallet.addr;
+            j["public_key"] = g_wallet.pub_b64;
+            j["rpc_url"] = g_wallet.rpc_url;
+        }
+        res.set_content(j.dump(), "application/json");
+    });
+
+    svr.Post("/api/dapp/connect", [](const httplib::Request& req, httplib::Response& res) {
+        WALLET_GUARD
+        json body;
+        try { body = json::parse(req.body); } catch (...) {
+            res.status = 400;
+            res.set_content(err_json("invalid json").dump(), "application/json");
+            return;
+        }
+        std::string origin = body.value("origin", "");
+        if (!octra::is_valid_http_origin(origin)) {
+            res.status = 400;
+            res.set_content(err_json("invalid origin").dump(), "application/json");
+            return;
+        }
+        std::string addr;
+        {
+            std::lock_guard<std::mutex> lock(g_mtx);
+            addr = g_wallet.addr;
+        }
+        g_dapp_conn.upsert(origin, addr);
+        json j;
+        j["ok"] = true;
+        j["address"] = addr;
+        res.set_content(j.dump(), "application/json");
+    });
+
+    svr.Post("/api/dapp/disconnect", [](const httplib::Request& req, httplib::Response& res) {
+        std::string origin = req.get_header_value("Origin");
+        if (!octra::is_valid_http_origin(origin)) {
+            res.status = 403;
+            res.set_content(err_json("invalid origin").dump(), "application/json");
+            return;
+        }
+        std::string target_addr;
+        if (!req.body.empty()) {
+            try {
+                json body = json::parse(req.body);
+                target_addr = body.value("wallet_addr", "");
+            } catch (...) {}
+        }
+        if (target_addr.empty()) {
+            if (g_wallet_loaded) {
+                std::lock_guard<std::mutex> lock(g_mtx);
+                target_addr = g_wallet.addr;
+            }
+        }
+        bool removed = false;
+        if (!target_addr.empty()) {
+            removed = g_dapp_conn.remove(origin, target_addr);
+        }
+        json j;
+        j["ok"] = true;
+        j["removed"] = removed;
+        res.set_content(j.dump(), "application/json");
+    });
+
+    svr.Get("/api/dapp/connections", [](const httplib::Request&, httplib::Response& res) {
+        WALLET_GUARD
+        std::string addr;
+        {
+            std::lock_guard<std::mutex> lock(g_mtx);
+            addr = g_wallet.addr;
+        }
+        auto list = g_dapp_conn.list_for_wallet(addr);
+        json arr = json::array();
+        for (auto& e : list) {
+            arr.push_back({
+                {"origin", e.origin},
+                {"created_ts", e.created_ts},
+                {"last_seen_ts", e.last_seen_ts},
+            });
+        }
+        json j;
+        j["connections"] = arr;
+        res.set_content(j.dump(), "application/json");
+    });
+
+    svr.Delete("/api/dapp/connections", [](const httplib::Request& req, httplib::Response& res) {
+        WALLET_GUARD
+        std::string origin = req.has_param("origin") ? req.get_param_value("origin") : "";
+        if (origin.empty()) {
+            res.status = 400;
+            res.set_content(err_json("origin required").dump(), "application/json");
+            return;
+        }
+        std::string addr;
+        {
+            std::lock_guard<std::mutex> lock(g_mtx);
+            addr = g_wallet.addr;
+        }
+        bool removed = g_dapp_conn.remove(origin, addr);
+        json j;
+        j["ok"] = true;
+        j["removed"] = removed;
         res.set_content(j.dump(), "application/json");
     });
 
